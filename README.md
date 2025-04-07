@@ -1,6 +1,6 @@
 # PyDA - Domain Adaptation
 
-This repository provides a collection of prominent domain adaptation algorithms implemented in Python. The algorithms are organized into three categories: Neural Network-based Methods, Kernel-based Methods, and Statistical Alignment Methods. All algorithms can be found in ``\TL_models".
+This repository provides a collection of prominent domain adaptation algorithms implemented in Python. The algorithms are organized into three categories: Neural Network-based Methods, Kernel-based Methods, and Statistical Alignment Methods. All algorithms can be found in "\TL_models".
 
 ## Neural Network-based Methods
 
