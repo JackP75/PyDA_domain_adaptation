@@ -40,13 +40,13 @@ This repository provides a collection of prominent domain adaptation algorithms 
 
 ## Installation
 
-To install PyDA, clone the repository and install the required dependencies:
+To install PyDA:
 
 ```bash
 pip install git+https://github.com/JackP75/PyDA_domain_adaptation.git
 ```
 
-OR
+OR, clone the repository and install the required dependencies:
 
 ```bash
 git clone https://github.com/JackP75/PyDA_domain_adaptation.git
