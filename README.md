@@ -45,6 +45,7 @@ To install PyDA, clone the repository and install the required dependencies:
 ```bash
 pip install git+https://github.com/JackP75/PyDA_domain_adaptation.git
 
+```markdown
 OR
 
 ```bash
