@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "PyDA"  
+version = "0.1.0"
+description = "A range of well-known DA algorithms"
+authors = [{ name = "Jack Poole", email = "jack-pc@live.com" }]
+dependencies = [
+    "numpy",
+    "tensorflow",
+    "matplotlib",
+    "scikit-learn",
+    "tqdm",
+    "cvxopt",
+    "scipy"
+]
+readme = "README.md"
+license = "MIT"
+
+[tool.setuptools]
+packages = ["TL_models", "TL_models.deep", "TL_models.kernel", "TL_models.stat"]
