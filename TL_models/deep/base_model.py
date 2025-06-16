@@ -17,10 +17,13 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score, accuracy_score
 
 from TL_models.dist_measures import PAD, MMD, JMMD
+from TL_models.deep.multi_layer_dense_network import MultiLayerDense
+from TL_models.deep.feature_extractor import FeatureExtractor
+
 
 class BaseModel(tf.keras.models.Model, ABC):
     def __init__(self, params={'feat_fc_layers': [10, 10],
-                                'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],#[filters, kernel]
+                                'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],
                                 'class_layers': [10, 10],
                                 'input_dim': 3,
                                 'output_size': 3,
@@ -29,119 +32,39 @@ class BaseModel(tf.keras.models.Model, ABC):
                                 'entropy': 1e-6,
                                 'BN': True,
                                 'lr': 1e-3,
-                                'pool_size':2,
-                                'stride': 1}, optimiser = keras.optimizers.Adam()):
+                                'pool_size': 2,
+                                'stride': 1}, optimiser=keras.optimizers.Adam()):
         super().__init__()
 
         self.params = params
-
-        # Hyperparameters
         self.output_size = params['output_size']
         self.drop_rate = params['drop_rate']
         self.reg = params['reg']
         self.BN = params['BN']
-
-        self.build_feature_extractor()
-        self.build_classifier()
         self.optimiser = optimiser
         self.update = False
 
-    def build_feature_extractor(self):
-        # Feature extractor
-        self.feature_extractor = []
-       
-        #  convolutional layers
-        for filt, kernel in self.params['feat_conv_layers']:
-            self.feature_extractor.append(layers.Conv2D(
-                filters=filt,
-                kernel_size=kernel,
-                strides=self.params['stride'],
-                padding='valid',
-                activation=None,
-                kernel_initializer=tf.keras.initializers.he_normal()
-            ))
-            
-            if self.params['BN']:
-                self.feature_extractor.append(layers.BatchNormalization())
-            if self.params['pool_size'] is not None:
-                self.feature_extractor.append(layers.MaxPool2D(pool_size=self.params['pool_size'], strides=self.params['stride']))
-            self.feature_extractor.append(layers.ReLU())
+        self.feature_extractor = FeatureExtractor(self.params['feat_conv_layers'],
+                            self.params['feat_fc_layers'],
+                            drop_rate=self.drop_rate,
+                            BN=self.BN,
+                            reg=self.reg
+                           )
+        self.classifier = MultiLayerDense(self.params['class_layers'],
+                            drop_rate=self.drop_rate,
+                            BN=self.BN,
+                            reg=self.reg,
+                            final_units=self.params['output_size'],
+                            final_activation=None)
 
-        # flatten #            
-        if len(self.params['feat_conv_layers']) > 0:
-            self.feature_extractor.append(layers.Flatten())
-
-        # fully connected layers
-        for nodes in self.params['feat_fc_layers']:
-            self.feature_extractor.append(layers.Dense(
-                nodes,
-                activation=None,
-                kernel_initializer=tf.keras.initializers.he_normal(),
-                kernel_regularizer=keras.regularizers.l2(self.reg)
-            ))
-            
-            if self.params['BN']:
-                self.feature_extractor.append(layers.BatchNormalization())
-            if self.drop_rate > 0:
-                self.feature_extractor.append(layers.Dropout(self.drop_rate))
-            self.feature_extractor.append(layers.ReLU())
-
-        
-
-    def build_classifier(self):
-        self.classifier = []
-        for nodes in self.params['class_layers']:
-
-            self.classifier.append(layers.Dense(
-                nodes,
-                activation=None,
-                kernel_initializer=tf.keras.initializers.he_normal(),
-                kernel_regularizer=keras.regularizers.l2(self.reg)
-            ))
-            if self.BN:
-                self.classifier.append(layers.BatchNormalization())
-            self.classifier.append(layers.Dropout(self.drop_rate))
-            self.classifier.append(layers.ReLU())
-
-        # Classifier layer, outputs logits
-        self.classifier.append(layers.Dense(
-            self.output_size,
-            activation=None,
-            kernel_initializer=tf.keras.initializers.he_normal(),
-            kernel_regularizer=keras.regularizers.l2(self.reg)
-        ))
-   
     def get_feature(self, x_in, training=False, return_all=False):
-        x = x_in
-        activations = []
-        for layer in self.feature_extractor:
-            x = layer(x, training=training)
-            if 're' in layer.name:
-                activations.append(x)
+        x = self.feature_extractor(x_in, return_all=return_all, training=training)
+        return x
+       
 
-        if return_all and activations[-1] is not x: #need this for flattening layers 
-            activations.append(tf.identity(x))
-
-        if return_all:
-            return activations 
-        else:
-            return x
-        
     def get_classification_logits(self, z, training=False, return_all=False):
-        
-        activations = []
-        for layer in self.classifier:
-            z = layer(z, training=training)
-            if 're' in layer.name:
-                activations.append(tf.identity(z))
-
-        if return_all and activations[-1] is not z: #need this for flattening layers 
-            activations.append(tf.identity(z))
-
-        if return_all:
-            return activations
-        else:
-            return z
+        z = self.classifier(z, return_all=return_all, training=training)
+        return z
     
     @abstractmethod
     def call(self, x_in, train=False):

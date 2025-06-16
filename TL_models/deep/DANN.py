@@ -20,6 +20,7 @@ from tqdm import tqdm
 from .utils import GradReverse, soft_loss, soft_loss2, sig_loss, get_lambda
 from .base_model import BaseModel
 from TL_models.standard_checks import check_inputs
+from TL_models.deep.multi_layer_dense_network import MultiLayerDense
 
 class DANN_model(BaseModel):
     def __init__(self,params={'feat_fc_layers': [10, 10],
@@ -43,37 +44,26 @@ class DANN_model(BaseModel):
         self.entropy=params['entropy']
         self.lr=params['lr']
         self.update = False
-
-        self.build_discriminator()
-
         
-    def build_discriminator(self):
-        #domain discriminator
         self.reverse=GradReverse()
-        self.discriminator=[]
-        for nodes in self.params['disc_layers']:
-            self.discriminator.append(layers.Dense(nodes, activation=None, 
-                                   kernel_initializer=tf.keras.initializers.he_normal(),
-                                   kernel_regularizer=keras.regularizers.l2(self.reg)))
-            if self.BN:
-                self.discriminator.append(layers.BatchNormalization())
-            self.discriminator.append(layers.Dropout(self.drop_rate))
-            self.discriminator.append(layers.ReLU())
-        self.disc_out=layers.Dense(2,activation=None)
+        self.discriminator = MultiLayerDense(self.params['class_layers'],
+                            drop_rate=self.drop_rate,
+                            BN=self.BN,
+                            reg=self.reg,
+                            final_units=2, 
+                            final_activation=None)
 
     def call(self, x_in, lmda=tf.constant(1.0), train=False):
        
         #feature extractor
-        feat_activations=self.get_feature(x_in,training=train)   
+        feat_activations=self.get_feature(x_in, training=train)   
 
         #classifier
-        class_activations=self.get_classification_logits(feat_activations,training=train)
+        class_activations=self.get_classification_logits(feat_activations, training=train)
     
         #domain discriminator
         d=self.reverse(feat_activations, lmda)
-        for layer in self.discriminator:
-            d=layer(d)
-        Dlogit=self.disc_out(d)
+        Dlogit = self.discriminator(d, training=train)
         
         return (Dlogit, class_activations) #returns logits of discriminator and classifier
     
