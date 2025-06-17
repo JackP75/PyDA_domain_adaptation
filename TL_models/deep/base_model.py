@@ -20,9 +20,18 @@ from TL_models.dist_measures import PAD, MMD, JMMD
 from TL_models.deep.multi_layer_dense_network import MultiLayerDense
 from TL_models.deep.feature_extractor import FeatureExtractor
 
+from TL_models.standard_checks import check_inputs
+
 
 class BaseModel(tf.keras.models.Model, ABC):
-    def __init__(self, params={'feat_fc_layers': [10, 10],
+    def __init__(self, training_data,
+                       training_params = {'lr': 1e-3, 
+                                          'optimiser':keras.optimizers.Adam(),
+                                          'epochs': 100,
+                                          'batch_size': 32,
+                                          'update':False, 
+                                          'pretrain': False}, 
+                       model_params={'feat_fc_layers': [10, 10],
                                 'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],
                                 'class_layers': [10, 10],
                                 'input_dim': 3,
@@ -31,37 +40,44 @@ class BaseModel(tf.keras.models.Model, ABC):
                                 'reg': 0.0001,
                                 'entropy': 1e-6,
                                 'BN': True,
-                                'lr': 1e-3,
                                 'pool_size': 2,
-                                'stride': 1}, optimiser=keras.optimizers.Adam()):
+                                'stride': 1} 
+                                ):
         super().__init__()
 
-        self.params = params
-        self.output_size = params['output_size']
-        self.drop_rate = params['drop_rate']
-        self.reg = params['reg']
-        self.BN = params['BN']
-        self.optimiser = optimiser
-        self.update = False
+        """"Base class for domain adaptation architectures.
+        Args: 
+        training data: tuple of (Xs, ys, Xt, yt) where yt is optional. 
+                       For semi-supervised DA, yt should be None to indicate missing labels.
+        training_params: dictionary of training parameters including learning rate, optimiser, and update flag.
+        model_params: dictionary of model parameters to define architecture
+        """
 
-        self.feature_extractor = FeatureExtractor(self.params['feat_conv_layers'],
-                            self.params['feat_fc_layers'],
-                            drop_rate=self.drop_rate,
-                            BN=self.BN,
-                            reg=self.reg
+        self.model_params = model_params
+        self.training_params = training_params
+        self.optimiser = training_params['optimiser']
+
+        self.build_model()
+        self.prepare_data(training_data) #ensures data is same size and is in tensorflow format
+
+    def build_model(self):
+        self.feature_extractor = FeatureExtractor(self.model_params['feat_conv_layers'],
+                            self.model_params['feat_fc_layers'],
+                            drop_rate=self.model_params['drop_rate'],
+                            BN=self.model_params['BN'],
+                            reg=self.model_params['reg']
                            )
-        self.classifier = MultiLayerDense(self.params['class_layers'],
-                            drop_rate=self.drop_rate,
-                            BN=self.BN,
-                            reg=self.reg,
-                            final_units=self.params['output_size'],
+        self.classifier = MultiLayerDense(self.model_params['class_layers'],
+                            drop_rate=self.model_params['drop_rate'],
+                            BN=self.model_params['BN'],
+                            reg=self.model_params['reg'],
+                            final_units=self.model_params['output_size'],
                             final_activation=None)
 
     def get_feature(self, x_in, training=False, return_all=False):
         x = self.feature_extractor(x_in, return_all=return_all, training=training)
         return x
        
-
     def get_classification_logits(self, z, training=False, return_all=False):
         z = self.classifier(z, return_all=return_all, training=training)
         return z
@@ -77,43 +93,77 @@ class BaseModel(tf.keras.models.Model, ABC):
     @abstractmethod
     def fit(self):
         return NotImplementedError
-    
-    def upsample_data(self, Xs, ys, Xt, yt, source_inds=None, target_inds=None, Ns_OH=0, Nt_OH = 0):
+
+    @staticmethod
+    def upsample_data(Xs, ys, Xt, yt, Nlabelled_target=0):
         # Get the sizes of the source and target datasets
         
-        size_s = Xs.shape[0] + Ns_OH
-        size_t = Xt.shape[0] + Nt_OH 
-        # print(size_s, size_t)
+        size_s = Xs.shape[0]
+        size_t = Xt.shape[0] + Nlabelled_target 
+
         # Determine the smaller and larger dataset sizes
         if size_s == size_t:
             # If both sizes are equal, return the datasets as they are
-            return Xt, yt, Xs, ys, source_inds, target_inds
+            return Xt, yt, Xs, ys
         
         # Identify the smaller dataset
         if size_s < size_t:
             # Upsample the source dataset
-            indices = np.random.choice(np.arange(size_s - Ns_OH), size=size_t - Ns_OH, replace=True)
+            indices = np.random.choice(np.arange(size_s), size=size_t, replace=True)
             Xs_upsampled = Xs[indices]
             ys_upsampled = ys[indices]
-            if source_inds is not None:
-                source_inds = source_inds[indices]
             
-            return Xt, yt, Xs_upsampled, ys_upsampled, source_inds, target_inds
+            return Xt, yt, Xs_upsampled, ys_upsampled
         else:
             # Upsample the target dataset
-            indices = np.random.choice(np.arange(size_t - Nt_OH), size=size_s - Nt_OH, replace=True)
+            indices = np.random.choice(np.arange(size_t), size=size_s, replace=True)
             Xt_upsampled = Xt[indices]
             if yt is not None:
                 yt_upsampled = yt[indices]
             else:
                 yt_upsampled = None
+        
+            return Xt_upsampled, yt_upsampled, Xs, ys
+        
+    def prepare_data(self, training_data):
+        """Prepare data for training/testing, 
+        assuming data was orginally numpy arrays with categorical label encoding"""
 
-            if target_inds is not None:
-                target_inds = target_inds[indices]
+        if len(training_data) == 3:
+            Xs, ys, Xt = training_data
+            yt = None
+            self.semi_super = False
+        elif len(training_data) == 4:
+            Xs, ys, Xt, yt = training_data
+            self.semi_super = True
+        else:
+            raise ValueError('Training data must be a tuple of (Xs, ys, Xt) or (Xs, ys, Xt, yt)!')
+
+        #check data is correct shape
+        check_inputs(Xs, ys, Xt, yt)
+
+        if yt is not None:
+            #prepare data for semi-supervised DA
+            label_index = np.where(yt is not None)[0]
+            #ratio of target labelled to source data is used for weighting losses
+            self.Q = label_index.shape[0] / (label_index.shape[0] + ys.shape[0])
+        else:
+            Nlabelled_target = 0  
             
-            return Xt_upsampled, yt_upsampled, Xs, ys, source_inds, target_inds
-    
-    
+
+        Xt ,yt, Xs, ys = self.upsample_data(Xs, ys, Xt, yt, Nlabelled_target)
+       
+        u = np.unique(ys.reshape(-1)).shape[0]
+        self.Ns = ys.shape[0]
+        ys=tf.one_hot(ys, u)
+        if yt is not None: #semi-supervised DA
+            self.target_inds = np.where(yt is not None)[0]
+            yt=tf.one_hot(yt, u)
+            self.training_dataset = tf.data.Dataset.from_tensor_slices((Xs, ys, Xt, yt)).shuffle(200).batch(self.training_params['batch_size'])
+        else: #unsupervised DA
+            self.training_dataset = tf.data.Dataset.from_tensor_slices((Xs, ys, Xt)).shuffle(200).batch(self.training_params['batch_size'])
+
+
     def predict(self,x):
         logit_C=self.call(x)[-1] #networks have multiple outputs; lasts is always class logits
         return np.argmax(tf.nn.softmax(logit_C,axis=1), axis=1)
@@ -121,7 +171,7 @@ class BaseModel(tf.keras.models.Model, ABC):
     def predict_proba(self,x):
         logit_C=self.call(x)[-1]
         return np.array(tf.nn.softmax(logit_C, axis=1))
-    
+
     def entropy(self, X_test, classes = None):
 
         if classes is None:
@@ -131,132 +181,33 @@ class BaseModel(tf.keras.models.Model, ABC):
         probs = np.clip(probs, epsilon, 1 - epsilon)
         return  -np.sum(probs[:, classes] * np.log(probs[:, classes]), axis=1)
     
-    
     def get_performance(self,x,y):
         #labels assumed to be in categorical 0,1,2 etc
         y_pred=self.predict(x)
         acc=accuracy_score(y,y_pred)
         f1=f1_score(y, y_pred,average='macro')
         
-        return f1,acc
-
-    def plot_loss(self):
-        # Plot loss
-        epochs = len(self.class_loss)
-        n = range(1, math.floor(epochs) + 1, 1)
-        plt.plot(n, self.domain_loss, label=self.params['loss_type'])
-        plt.plot(n, self.class_loss, label="class loss")
-        plt.xlabel('epoch')
-        plt.ylabel('loss')
-        plt.legend()
-        plt.show()
-
-        # Plot F1
-        plt.plot(n, self.f1, label="F1 per 10 epochs")
-        plt.xlabel('epoch')
-        plt.ylabel('x_test F1')
-        plt.legend()
-        plt.show()
-
-    def apply_dimensionality_reduction(self, Zs, Zt, feature_reduction):
-        """Apply the specified dimensionality reduction technique."""
-        # Standardize the features
-        scale = StandardScaler()
-        Z = np.vstack((Zs, Zt))
-        Z = scale.fit(Z).transform(Z)
-
-        if feature_reduction == 'PCA':
-            pca = PCA()
-            pca.fit(Z)
-            Zs = pca.transform(Zs)
-            Zt = pca.transform(Zt)
-            print(f'PCA explained variance ratio cumulative sum: {np.cumsum(pca.explained_variance_ratio_)[:10]}')
-            return Zs, Zt
-
-        elif feature_reduction == 't-SNE':
-            tsne = TSNE(n_components=2, random_state=42)
-            Zs = tsne.fit_transform(Zs)
-            Zt = tsne.fit_transform(Zt)
-            return Zs, Zt
-
-        else:
-            raise ValueError("Unsupported feature reduction method. 'PCA' and 't-SNE' are implemented.")
-
-    def plot_transfer(self, Zs, Zt, ys, yt, colour='domain', name=None, xlabel='PC 1', ylabel='PC 2'):
-        """Plot the transfer visualization with label numbers as markers, 
-        domain represented by colour, and optional feature dimensions."""
-
-        plt.figure(figsize=(10, 8))
-
-        for i, point in enumerate(Zs):
-            plt.text(point[0], point[1], str(ys[i]), fontsize=12, ha='center', va='center', color='red')  
-
-        for i, point in enumerate(Zt):
-            plt.text(point[0], point[1], str(yt[i]), fontsize=12, ha='center', va='center', color='blue') 
-
-        if colour == 'domain':
-            plt.scatter(Zs[:, 0], Zs[:, 1], c=ys, label='Source Domain', alpha=0.0, cmap='viridis')
-            plt.scatter(Zt[:, 0], Zt[:, 1], c=yt, label='Target Domain', marker='x', alpha=0.0, cmap='viridis')
-        else:
-            plt.scatter(Zs[:, 0], Zs[:, 1], c=ys, label='Source Domain', alpha=0.0)
-            plt.scatter(Zt[:, 0], Zt[:, 1], c=yt, label='Target Domain', alpha=0.0)
-
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.legend()
-
-        if name:
-            plt.title(name)
-        plt.show()
-
-
-    def plot_feature(self, test_data, colour='domain', name=None, feature_reduction='PCA'):
-        """Main method to plot feature reduction."""
-        
-        Xt = test_data[0]
-        yt = test_data[1]
-        Xs = test_data[2]
-        ys = test_data[3]
-        
-        Zs = self.get_feature(Xs).numpy()
-        Zt = self.get_feature(Xt).numpy()
-        
-        Zs, Zt = self.apply_dimensionality_reduction(Zs, Zt, feature_reduction)
-
-        self.plot_transfer(Zs, Zt, ys, yt, colour=colour, name=name, xlabel='$X_1$', ylabel='$X_2$')
-
-    def measure_divergence(self, test_data, args):
-        """Measure divergence between source and target domains 
-        using specified method (PAD, MMD, or JMMD).
-        Specifying None for lengeth scale used the median heuristic"""
-    
-        Xt = test_data[0]
-        Xs = test_data[2]
-        yt = test_data[1]
-        ys = test_data[3]
-        Yt = np.unique(yt).shape[0]
-        Ys = np.unique(ys).shape[0]
-        
-        # Get the features (assumed to be the last element from self.get_feature)
-        Zs = self.get_feature(Xs)[-1].numpy()
-        Zt = self.get_feature(Xt)[-1].numpy()
-
-        method = args.get('method', 'PAD')  
-        kernel = args.get('kernel', 'rbf')  
-        kernel = args.get('l', None)  
-
-        l = args.get('l', None) 
-        if method == 'PAD':
-            return PAD(Zs, Zt, kernel=kernel, Ys=Ys, Yt=Yt)
-        elif method == 'MMD':
-            return MMD(Zs, Zt, l=l)
-        elif method == 'JMMD':
-            return JMMD(Zs, Zt, ys, yt, l=l)   
-        else:
-            raise ValueError(f"Only 'PAD', 'MMD', and 'JMMD' are implemented.")
-
+        return f1, acc
 
     def get_summary(self):
         self.built = True
         self.summary()
 
+    def from_json(cls, config_file):
+        """Loads data and parameters from a JSON file."""
+        pass
+
+    def plot_feature(self, test_data, colour='domain', name=None, feature_reduction='PCA'):
+            """Main method to plot feature reduction."""
+            
+            Xt = test_data[0]
+            yt = test_data[1]
+            Xs = test_data[2]
+            ys = test_data[3]
+            
+            Zs = self.get_feature(Xs).numpy()
+            Zt = self.get_feature(Xt).numpy()
+            
+            Zs, Zt = self.apply_dimensionality_reduction(Zs, Zt, feature_reduction)
+
+            self.plot_transfer(Zs, Zt, ys, yt, colour=colour, name=name, xlabel='$X_1$', ylabel='$X_2$')
