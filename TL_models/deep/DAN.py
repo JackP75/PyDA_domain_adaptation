@@ -21,7 +21,13 @@ from sklearn.metrics import  pairwise_distances
 import tensorflow.experimental.numpy as tnp
 
 class DAN_model(BaseModel):
-    def __init__(self,params={'feat_fc_layers': [10, 10],
+    def __init__(self, training_data, training_params={'lr': 1e-3, 
+                                'optimiser':tf.keras.optimizers.SGD(),
+                                'epochs': 100,
+                                'batch_size': 32,
+                                'update':False, 
+                                'pretrain': False},
+                 model_params={'feat_fc_layers': [10, 10],
                             'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],#[filters, kernel]
                             'class_layers': [10, 10],
                             'disc_layers':[10, 10],
@@ -33,16 +39,13 @@ class DAN_model(BaseModel):
                             'BN': True,
                             'lr': 1e-3,
                             'pool_size':2,
-                            'stride': 1}, optimiser=tf.keras.optimizers.Adam()):
-        super().__init__(params, optimiser)   
+                            'stride': 1}):
+        super().__init__(training_data, training_params, model_params)   
          
+        self.numpy_data = training_data
 
-        self.params=params
-        
-        #hyperparameters
-        self.lr=params['lr']
-        self.entropy=params['entropy']
-        self.N_conv = len(self.params['feat_conv_layers'])
+        #save number of conv layers so MMD calc uses dense layers     
+        self.N_conv = len(model_params['feat_conv_layers'])
         if self.N_conv >0:
             self.N_conv += 1 #flatten layer
 
@@ -164,10 +167,10 @@ class DAN_model(BaseModel):
     def update_MK_MMD(self,X,Y=None):
         
         tf.experimental.numpy.experimental_enable_numpy_behavior()
-        if self.params['length scales'] is None:
+        if self.model_params['length_scales'] is None:
             self.length_scales= [2**p for p in np.arange(-8, 8.5, 0.5)]#used in paper
         else:
-            self.length_scales = self.params['length scales']
+            self.length_scales = self.model_params['length_scales']
         
         m = len(self.length_scales)
         ##get features
@@ -180,7 +183,7 @@ class DAN_model(BaseModel):
 
         if m == 1:
             self.betas = [[1] for i in Zs]
-        elif self.params['length scales'] == 'median':
+        elif self.model_params['length_scales'] == 'median':
             
             self.length_scales = [median_heuristic(zs, zt) for zs, zt in zip(Zs, Zt)]
 
@@ -258,54 +261,14 @@ class DAN_model(BaseModel):
         
         return class_loss,MMD_loss
         
-    def fit(self, Xs, ys, Xt, yt=None, s_OH=None, t_OH=None, source_inds=None, target_inds=None,
-             epochs=10, pretrain=False, batch_size = 100, print_training=False, lmda=None):
+    def fit(self):
         
-        check_inputs(Xs, ys, Xt, yt)
-        
-        if s_OH is not None:
-            Xs_OH, ys_OH = s_OH
-            Ns_OH = ys_OH.shape[0]
+        epochs = self.training_params['epochs']
+        pretrain = self.training_params.get('pretrain', False)
+        self.optimiser.learning_rate.assign(self.training_params['lr'])
+        lmda = self.training_params.get('lmda', None)
+        MK_MMD_samples = self.training_params.get('MK_MMD_samples', 1000)   
 
-        else:
-            Ns_OH = 0
-
-        if t_OH is not None:
-            Xt_OH, yt_OH = t_OH
-            Nt_OH = yt_OH.shape[0]
-        else:
-            Nt_OH = 0
-        
-        u = np.unique(ys.reshape(-1)).shape[0]
-        self.Ns = ys.shape[0]
-
-        if yt is not None and (source_inds is None or target_inds is None):
-            raise ValueError('To train in semi-supervised setting, specify source_inds/target_inds mask vectors!')
-        elif yt is not None:
-             #proportion of source/target labelled data for weighting losses
-            self.Q = np.sum(target_inds) / (np.sum(target_inds) + np.sum(source_inds))
-
-        Xt ,yt, Xs, ys, source_inds, target_inds = self.upsample_data(Xs, ys, Xt, yt, source_inds,
-                                                                       target_inds, Ns_OH, Nt_OH)
-        ys=tf.one_hot(ys, u)
-        
-        if s_OH is not None:
-            Xs = tf.concat([Xs, Xs_OH], axis=0)
-            ys = tf.concat([ys, ys_OH], axis=0)
-            source_inds = tf.concat([source_inds, tf.zeros([ys_OH.shape[0]])], axis=0)
-        
-        if yt is not None: #semi-supervised DA
-            yt=tf.one_hot(yt, u)
-            if t_OH is not None:
-                Xt = tf.concat([Xt, Xt_OH], axis=0)
-                yt = tf.concat([yt, yt_OH], axis=0)
-                target_inds = tf.concat([target_inds, tf.zeros([yt_OH.shape[0]])], axis=0)
-            dataset = tf.data.Dataset.from_tensor_slices((Xs,ys, Xt, yt)).shuffle(200).batch(batch_size) 
-
-        else: #unsupervised DA
-            dataset = tf.data.Dataset.from_tensor_slices((Xs,ys, Xt)).shuffle(200).batch(batch_size) 
-    
-        self.optimiser.learning_rate.assign(self.lr)
         c_lossL, disc_lossL, ct_lossL = [], [], []
         for epoch in tqdm(range(epochs)):
             #init cumulative loss 
@@ -316,7 +279,7 @@ class DAN_model(BaseModel):
             start= time.time()
 
             #set hyperparameters for epoch
-            progress=epoch/epochs
+            progress = epoch/epochs
             if pretrain:
                 lmda = tf.constant(0.0, dtype=tf.float32)
                 self.T_sig = False
@@ -328,21 +291,31 @@ class DAN_model(BaseModel):
                     pass
 
             if epoch % 10 == 0: 
+                Xs_full = self.numpy_data[0]
+                Xt_full = self.numpy_data[2]
+
+                Xs_idx = np.random.choice(Xs_full.shape[0], size=min(MK_MMD_samples, len(Xs_full)), replace=False)
+                Xt_idx = np.random.choice(Xt_full.shape[0], size=min(MK_MMD_samples, len(Xt_full)), replace=False)
+
+                Xs = Xs_full[Xs_idx, ...]
+                Xt = Xt_full[Xt_idx, ...]
+
                 self.update_MK_MMD(Xs, Xt)
-                # tf.numpy_function(self.update_MK_MMD(Xs[:100],Xt[:100]))
-                # print(self.betas)
-            for batch in dataset:
+                self.update_MK_MMD(self.numpy_data[0], self.numpy_data[2])
+   
+            for batch in self.training_dataset:
                 if yt is None:
                     Xs,ys,Xt = batch
-                    class_loss,disc_loss =self.train_step(Xs,ys,Xt, 
+                    class_loss, disc_loss =self.train_step(Xs,ys,Xt, 
                                                         lmda=lmda)
                 else:
                     Xs,ys,Xt, yt = batch
-                    class_loss,disc_loss, class_losst =self.train_step(Xs,ys,Xt, yt, 
-                                                                       lmda=lmda, source_inds=source_inds, target_inds=target_inds)
+                    class_loss, disc_loss, class_losst =self.train_step(Xs,ys,Xt, yt, 
+                                                                       lmda=lmda)
                 c_class_loss+=class_loss
-                # c_classt_loss+=class_losst
+                c_classt_loss+=class_losst
                 c_disc_loss+=disc_loss
+
             c_lossL.append(c_class_loss)
             disc_lossL.append(c_disc_loss)
             ct_lossL.append(c_classt_loss)
@@ -357,11 +330,4 @@ class DAN_model(BaseModel):
                     else:
                         print('Source classifier loss: '+str(c_class_loss)+'| MMD loss:'+ str(c_disc_loss)+'| Target classifier loss:'+ str(c_classt_loss))
             
-        if print_training:
-            plt.plot(range(epochs), c_lossL)
-            plt.plot(range(epochs), disc_lossL)
-            plt.legend(['cross-entropy loss', 'MMD loss'])
-            if yt is not None:            
-                plt.plot(range(epochs), ct_lossL)
-                plt.legend(['cross-entropy loss', 'MMD loss', 'target cross-entropy loss'])
-            plt.show()
+        return c_lossL, disc_lossL, ct_lossL
