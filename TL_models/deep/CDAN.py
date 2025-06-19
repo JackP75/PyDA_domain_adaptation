@@ -11,19 +11,28 @@ from .DANN import DANN_model
 
 #the issue was the way lmda was being fed into the gradrev layer =)
 class CDAN_model(DANN_model):
-    def __init__(self,params={'feature_nodes':10,
-                              'num_feat_layers':2,
-                              'num_class_layers':2,
-                              'disc_nodes':20,
-                              'num_disc_layers':2,
-                              'output_size':3,
-                              'drop_rate':0.25,
-                              'reg':0.0001,
-                              'entropy':1e-6,
-                              'BN':True,
-                              'lr':1e-3}, optimiser=tf.keras.optimizers.Adam()):
+    def __init__(self, training_data, 
+                 training_params={'lr': 1e-3, 
+                                'optimiser':tf.keras.optimizers.SGD(),
+                                'epochs': 100,
+                                'batch_size': 32,
+                                'update':False, 
+                                'pretrain': False},
+                 model_params={'feat_fc_layers': [10, 10],
+                            'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],#[filters, kernel]
+                            'class_layers': [10, 10],
+                            'disc_layers':[10, 10],
+                            'input_dim': 3,
+                            'output_size': 3,
+                            'drop_rate': 0.25,
+                            'reg': 0.0001,
+                            'entropy': 1e-6,
+                            'BN': True,
+                            'lr': 1e-3,
+                            'pool_size':2,
+                            'stride': 1}):
     
-        super().__init__(params, optimiser)    
+        super().__init__(training_data, training_params, model_params)    
         
     def get_multi_map(self,feat_activations,class_activations):
         yc_exp=tf.stop_gradient(tf.expand_dims(tf.nn.softmax(class_activations),1))
