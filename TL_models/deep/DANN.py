@@ -23,7 +23,13 @@ from TL_models.standard_checks import check_inputs
 from TL_models.deep.multi_layer_dense_network import MultiLayerDense
 
 class DANN_model(BaseModel):
-    def __init__(self,params={'feat_fc_layers': [10, 10],
+    def __init__(self, training_data, training_params={'lr': 1e-3, 
+                                'optimiser':tf.keras.optimizers.SGD(),
+                                'epochs': 100,
+                                'batch_size': 32,
+                                'update':False, 
+                                'pretrain': False},
+                 model_params={'feat_fc_layers': [10, 10],
                             'feat_conv_layers': [[10,(3,3)], [10,(5,5)]],#[filters, kernel]
                             'class_layers': [10, 10],
                             'disc_layers':[10, 10],
@@ -35,28 +41,22 @@ class DANN_model(BaseModel):
                             'BN': True,
                             'lr': 1e-3,
                             'pool_size':2,
-                            'stride': 1}, optimiser = keras.optimizers.Adam()):
-        super().__init__(params, optimiser)    
+                            'stride': 1}):
+        super().__init__(training_data, training_params, model_params)
 
-        #hyperparameters
-        self.reg=params['reg']
-        self.BN=params['BN']
-        self.entropy=params['entropy']
-        self.lr=params['lr']
-        self.update = False
-        
-        self.reverse=GradReverse()
-        self.discriminator = MultiLayerDense(self.params['class_layers'],
-                            drop_rate=self.drop_rate,
-                            BN=self.BN,
-                            reg=self.reg,
-                            final_units=2, 
-                            final_activation=None)
+        self.reverse = GradReverse()
+        self.discriminator = MultiLayerDense(self.model_params['disc_layers'],
+                                              drop_rate=self.model_params['drop_rate'],
+                                              BN=self.model_params['BN'],
+                                              reg=self.model_params['reg'],
+                                              final_units=2,
+                                              final_activation=None)
+
 
     def call(self, x_in, lmda=tf.constant(1.0), train=False):
-       
+
         #feature extractor
-        feat_activations=self.get_feature(x_in, training=train)   
+        feat_activations=self.get_feature(x_in, training=train)
 
         #classifier
         class_activations=self.get_classification_logits(feat_activations, training=train)
@@ -99,31 +99,31 @@ class DANN_model(BaseModel):
         return class_loss,disc_loss
    
     @tf.function 
-    def train_step(self,Xs,ys,Xt, yt=None,lmda=tf.constant(1.0), source_inds=None, target_inds=None):
+    def train_step(self,Xs,ys,Xt, yt=None,lmda=tf.constant(1.0)):
         class_losst = 0
         with tf.GradientTape() as tape:
 
             ds =self.call(Xs,lmda=lmda,train=True)
             dt =self.call(Xt,lmda=lmda,train=True)
 
-            if source_inds is None:
-                class_loss=soft_loss(ds[-1],ys)
-            else:
-                #if some source are unlabelled
-                class_loss = soft_loss2(ds[-1], ys, source_inds)
-                       
+            #cross-entropy loss
+            class_loss=soft_loss(ds[-1],ys)
+            
+            #entropy in target
             pt=tf.nn.softmax(dt[-1],axis=1)
             h=tf.multiply(pt,tf.math.log(pt))            
             target_entropy=-tf.reduce_mean(h,axis=0)
+
+            #discriminator loss
             disc_loss =self.get_disc_loss(ds,dt)
                          
-            #add optional target loss for semi-supervised
+            #target cross entropy loss for semi-supervised
             if yt is not None and self.T_sig:
-                class_losst = soft_loss2(dt[-1], yt, target_inds)
+                class_losst = soft_loss2(dt[-1], yt, self.target_inds)
                 class_loss =  self.Q * class_losst + (1-self.Q) * class_loss #weight the mean of losses
-                loss = class_loss + lmda * disc_loss + tf.add_n(self.losses) + self.entropy*target_entropy
+                loss = class_loss + lmda * disc_loss + tf.add_n(self.losses) + self.model_params['entropy'] * target_entropy
             else:
-                loss = class_loss + disc_loss + tf.add_n(self.losses) + self.entropy*target_entropy #lmda * 
+                loss = class_loss + lmda * disc_loss + tf.add_n(self.losses) + self.model_params['entropy'] * target_entropy
 
         #get gradients 
         gradients= tape.gradient(loss, self.trainable_variables)
@@ -134,55 +134,14 @@ class DANN_model(BaseModel):
         return class_loss,disc_loss, class_losst
     
         
-    def fit(self, Xs, ys, Xt, yt=None, s_OH=None, t_OH=None, source_inds=None, target_inds=None,
-             epochs=10, pretrain=False, batch_size = 100, print_training=False):
+    def fit(self):
         
-        check_inputs(Xs, ys, Xt, yt)
-        
-        if s_OH is not None:
-            Xs_OH, ys_OH = s_OH
-            Ns_OH = ys_OH.shape[0]
+        epochs = self.training_params['epochs']
+        pretrain = self.training_params.get('pretrain', False)
+        update = self.training_params.get('update', False)
+        self.optimiser.learning_rate.assign(self.training_params['lr'])
 
-        else:
-            Ns_OH = 0
-
-        if t_OH is not None:
-            Xt_OH, yt_OH = t_OH
-            Nt_OH = yt_OH.shape[0]
-        else:
-            Nt_OH = 0
-        
-        u = np.unique(ys.reshape(-1)).shape[0]
-        self.Ns = ys.shape[0]
-
-        if yt is not None and (source_inds is None or target_inds is None):
-            raise ValueError('To train in semi-supervised setting, specify source_inds/target_inds mask vectors!')
-        elif yt is not None:
-             #proportion of source/target labelled data for weighting losses
-            self.Q = np.sum(target_inds) / (np.sum(target_inds) + np.sum(source_inds))
-
-        Xt ,yt, Xs, ys, source_inds, target_inds = self.upsample_data(Xs, ys, Xt, yt, source_inds,
-                                                                       target_inds, Ns_OH, Nt_OH)
-        ys=tf.one_hot(ys, u)
-        
-        if s_OH is not None:
-            Xs = tf.concat([Xs, Xs_OH], axis=0)
-            ys = tf.concat([ys, ys_OH], axis=0)
-            source_inds = tf.concat([source_inds, tf.zeros([ys_OH.shape[0]])], axis=0)
-        
-        if yt is not None: #semi-supervised DA
-            yt=tf.one_hot(yt, u)
-            if t_OH is not None:
-                Xt = tf.concat([Xt, Xt_OH], axis=0)
-                yt = tf.concat([yt, yt_OH], axis=0)
-                target_inds = tf.concat([target_inds, tf.zeros([yt_OH.shape[0]])], axis=0)
-            dataset = tf.data.Dataset.from_tensor_slices((Xs,ys, Xt, yt)).shuffle(200).batch(batch_size)
-
-        else: #unsupervised DA
-            dataset = tf.data.Dataset.from_tensor_slices((Xs,ys, Xt)).shuffle(200).batch(batch_size)
-    
-        self.optimiser.learning_rate.assign(self.lr)
-        c_lossL, disc_lossL, ct_lossL = [], [], []
+        c_lossL, disc_lossL, ct_lossL = [], [], [] #tracking total loss per epoch
         for epoch in tqdm(range(epochs)):
             #init cumulative loss 
             c_class_loss=0
@@ -192,23 +151,22 @@ class DANN_model(BaseModel):
             start= time.time()
 
             #set hyperparameters for epoch
-            progress=epoch/epochs
             if pretrain:
                 lmda = tf.constant(0.0, dtype=tf.float32)
                 self.T_sig = False
             else:
                 self.T_sig = True
-                lmda =  tf.constant(get_lambda(progress), dtype=tf.float32) #
+                lmda =  tf.constant(get_lambda(epoch/epochs), dtype=tf.float32) 
   
-            for batch in dataset:
-                if yt is None:
+            for batch in self.training_dataset:
+                if not self.semi_super:
                     Xs,ys,Xt = batch
                     class_loss,disc_loss, class_losst =self.train_step(Xs,ys,Xt, 
-                                                                       lmda=lmda, source_inds=source_inds, target_inds=target_inds)
+                                                                       lmda=lmda)
                 else:
                     Xs,ys,Xt, yt = batch
-                    class_loss,disc_loss, class_losst =self.train_step(Xs,ys,Xt, yt, 
-                                                                       lmda=lmda, source_inds=source_inds, target_inds=target_inds)
+                    class_loss, disc_loss, class_losst =self.train_step(Xs,ys,Xt, yt, 
+                                                                       lmda=lmda)
                 c_class_loss+=class_loss
                 c_classt_loss+=class_losst
                 c_disc_loss+=disc_loss
@@ -219,18 +177,11 @@ class DANN_model(BaseModel):
             if epoch%100==0: 
                 #print metrics
                
-                if self.update:
+                if update:
                     print ('Time for epoch {} is {} sec'.format(epoch + 1, time.time()-start))
                     if yt is None:
                         print('Source classifier loss: '+str(c_class_loss)+'| discriminator loss:'+ str(c_disc_loss))
                     else:
                         print('Source classifier loss: '+str(c_class_loss)+'| discriminator loss:'+ str(c_disc_loss)+'| Target classifier loss:'+ str(c_classt_loss))
             
-        if print_training:
-            plt.plot(range(epochs), c_lossL)
-            plt.plot(range(epochs), disc_lossL)
-            plt.legend(['cross-entropy loss', 'discrimator loss'])
-            if yt is not None:            
-                plt.plot(range(epochs), ct_lossL)
-                plt.legend(['cross-entropy loss', 'discrimator loss', 'target cross-entropy loss'])
-            plt.show()
+        return c_lossL, disc_lossL, ct_lossL
