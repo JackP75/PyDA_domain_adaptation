@@ -31,6 +31,7 @@ class MultiLayerDense(tf.keras.layers.Layer):
         super(MultiLayerDense, self).__init__(name=name)
         self.return_activations = []
         self.nn = []
+        self.activation = activation
 
         for i, units in enumerate(layer_sizes):
             self.nn.append(layers.Dense(
